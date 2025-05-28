@@ -1,0 +1,259 @@
+diff -duwr Makelangelo-firmware/board_ramps.h ../Makelangelo-firmware/board_ramps.h
+--- Makelangelo-firmware/board_ramps.h	2019-09-23 13:49:26.000000000 +0530
++++ ../Makelangelo-firmware/board_ramps.h	2021-03-27 12:40:39.235163999 +0530
+@@ -40,7 +40,7 @@
+ #define MOTOR_4_ENABLE_PIN        (30)
+ #define MOTOR_4_LIMIT_SWITCH_PIN  (15)  /* Y Max */
+ 
+-#define MAX_BOARD_SERVOS          (4)
++#define MAX_BOARD_SERVOS          (1) // was 4 by default
+ #define SERVO0_PIN                (11)   /* Servo 1 */
+ #define SERVO1_PIN                (6)
+ #define SERVO2_PIN                (5)
+diff -duwr Makelangelo-firmware/configure.h ../Makelangelo-firmware/configure.h
+--- Makelangelo-firmware/configure.h	2019-09-27 15:40:16.000000000 +0530
++++ ../Makelangelo-firmware/configure.h	2021-03-27 11:08:39.691690030 +0530
+@@ -51,8 +51,8 @@
+ // LCD panels supported
+ //------------------------------------------------------------------------------
+ 
+-#define HAS_LCD  // if you have an LCD panel
+-#define HAS_SD   // if you have SD card support on your LCD panel (must be on panel?)
++//#define HAS_LCD  // if you have an LCD panel
++//#define HAS_SD   // if you have SD card support on your LCD panel (must be on panel?)
+ 
+ // only uncomment one of these options
+ //#define LCD_IS_128X64  // reprapdiscount Full Graphic Smart LCD Controller
+@@ -71,7 +71,7 @@
+ #define BOARD_SIXI_MEGA    6  // Arduino Mega + custom shield for Sixi 2 robot
+ 
+ #ifndef MOTHERBOARD
+-#define MOTHERBOARD BOARD_RUMBA  // change this
++#define MOTHERBOARD BOARD_RAMPS //BOARD_RUMBA  // change this
+ #endif
+ 
+ #include "board_rumba.h"
+@@ -106,7 +106,8 @@
+ // Marginallyclever.com uses GT2 timing belt, which has 2mm teeth.
+ // We also use GT2-20 pulleys which have 20 teeth.
+ // 20*2 means the pitch is 40.
+-#define PULLEY_PITCH         (40.0)
++//#define PULLEY_PITCH         (40.0)
++#define PULLEY_PITCH         (120.0)
+ 
+ // These numbers are calculated from the above.  No need to change these.
+ #ifndef NORMAL_MOTOR_STEPS
+diff -duwr Makelangelo-firmware/Makelangelo-firmware.ino ../Makelangelo-firmware/Makelangelo-firmware.ino
+--- Makelangelo-firmware/Makelangelo-firmware.ino	2019-09-29 11:56:44.000000000 +0530
++++ ../Makelangelo-firmware/Makelangelo-firmware.ino	2021-03-27 19:04:51.238745382 +0530
+@@ -10,8 +10,8 @@
+ //------------------------------------------------------------------------------
+ #include "configure.h"
+ #include "motor.h"
+-#include "SDcard.h"
+-#include "LCD.h"
++#include "sdcard.h"
++#include "lcd.h"
+ #include "eeprom.h"
+ 
+ #include <SPI.h>  // pkm fix for Arduino 1.5
+@@ -233,13 +233,17 @@
+    @input pos NUM_AXIES floats describing destination coordinates
+    @input new_feed_rate speed to travel along arc
+ */
+-void lineSafe(float *pos, float new_feed_rate) {
++void lineSafe(float *pos, float new_feed_rate, float angle) {
+   float destination[NUM_AXIES];
+   int i;
+   for (i = 0; i < NUM_AXIES; ++i) {
+     destination[i] = pos[i] - tool_offset[current_tool][i];
+     // @TODO confirm destination is within max/min limits.
+   }
++  float aangle = 0;
++  if (angle != -1) {
++    aangle = angle;
++  }
+ 
+ #ifdef SUBDIVIDE_LINES
+   // split up long lines to make them straighter
+@@ -272,12 +276,12 @@
+     for (i = 0; i < NUM_AXIES; ++i) {
+       temp[i] = delta[i] * a + startPos[i];
+     }
+-    motor_line(temp, new_feed_rate);
++    motor_line(temp, new_feed_rate, aangle);
+   }
+ #endif
+ 
+   // guarantee we stop exactly at the destination (no rounding errors).
+-  motor_line(destination, new_feed_rate);
++  motor_line(destination, new_feed_rate, aangle);
+ }
+ 
+ 
+@@ -337,7 +341,7 @@
+     n[2] = ( z - sz ) * scale + sz;
+ #endif
+     // send it to the planner
+-    lineSafe(n, new_feed_rate);
++    lineSafe(n, new_feed_rate, -1);
+   }
+ }
+ 
+@@ -568,7 +572,17 @@
+     pos[i] = parseNumber(AxisNames[i], (absolute_mode ? offset[i] : 0)) + (absolute_mode ? 0 : offset[i]);
+   }
+ 
+-  lineSafe( pos, f );
++  //pardhav-hack
++  float a = parseNumber('R', -1);
++  /*
++  if (a != -1) {
++    Serial.print(F("Rotate Angle: "));
++    Serial.println(a);
++    rotatePen(a);
++  }
++  */
++
++  lineSafe( pos, f, a);
+ }
+ 
+ 
+@@ -865,6 +879,14 @@
+     saveUID();
+   }
+ 
++  if (!strncmp(serialBuffer, "R", 1)) {
++    int angle = atoi(strchr(serialBuffer, ' ') + 1);
++    Serial.print(F("Rotate Angle: "));
++    Serial.println(angle);
++    rotatePen(angle % 360);
++    return;
++  }
++
+   long cmd;
+ 
+   // M codes
+diff -duwr Makelangelo-firmware/motor.cpp ../Makelangelo-firmware/motor.cpp
+--- Makelangelo-firmware/motor.cpp	2019-09-30 14:16:58.000000000 +0530
++++ ../Makelangelo-firmware/motor.cpp	2021-03-27 19:07:56.564422312 +0530
+@@ -11,7 +11,7 @@
+ #include "configure.h"
+ #include "motor.h"
+ #include "MServo.h"
+-#include "LCD.h"
++//#include "LCD.h"
+ 
+ //------------------------------------------------------------------------------
+ // MACROS
+@@ -37,6 +37,7 @@
+ Motor motors[NUM_MOTORS + NUM_SERVOS];
+ #ifndef ESP8266
+ Servo servos[NUM_SERVOS];
++Servo rServo;
+ #endif
+ 
+ Segment line_segments[MAX_SEGMENTS];
+@@ -232,6 +233,9 @@
+ #endif  // ESP8266
+ #endif
+ 
++//pardhav-hack
++rServo.attach(SERVO3_PIN);
++
+ #if NUM_SERVOS>1
+   servos[1].attach(SERVO1_PIN);
+ #endif
+@@ -250,6 +254,7 @@
+   Segment &old_seg = line_segments[get_prev_segment(last_segment)];
+   for (i = 0; i < NUM_MOTORS + NUM_SERVOS; ++i) {
+     old_seg.a[i].step_count = 0;
++    old_seg.angle = 0;
+   }
+ 
+   working_seg = NULL;
+@@ -332,6 +337,16 @@
+ }
+ 
+ 
++void rotatePen(int angle) {
++  //rServo.attach(SERVO3_PIN);
++  if (angle > 180) {
++    rServo.write(360 - angle);
++  } else {
++    rServo.write(180 - angle);
++  }
++  //delay(500);
++  //rServo.detach();
++}
+ 
+ 
+ void recalculate_reverse_kernel(Segment *const current, const Segment *next) {
+@@ -717,6 +732,9 @@
+       // New segment!
+       working_seg->busy = true;
+ 
++      // pardhav - hack - rotate segment
++      rotatePen(working_seg->angle);
++
+       // set the direction pins
+       digitalWrite( MOTOR_0_DIR_PIN, working_seg->a[0].dir );
+       global_step_dir_0 = (working_seg->a[0].dir == HIGH) ? 1 : -1;
+@@ -1025,7 +1043,7 @@
+    @input pos NUM_AXIES floats describing destination coordinates
+    @input new_feed_rate speed to travel along arc
+ */
+-void motor_line(const float * const target_position, float &fr_mm_s) {
++void motor_line(const float * const target_position, float &fr_mm_s, float angle) {
+   long steps[NUM_MOTORS + NUM_SERVOS];
+ 
+   // convert from the cartesian position to the motor steps
+@@ -1070,6 +1088,7 @@
+   
+   new_seg.busy = false;
+   new_seg.distance = distance_mm;
++  new_seg.angle = angle;
+   float inverse_distance_mm = 1.0 / new_seg.distance;
+   float inverse_secs = fr_mm_s * inverse_distance_mm;
+ 
+diff -duwr Makelangelo-firmware/motor.h ../Makelangelo-firmware/motor.h
+--- Makelangelo-firmware/motor.h	2019-09-24 09:42:10.000000000 +0530
++++ ../Makelangelo-firmware/motor.h	2021-03-27 18:56:42.460456990 +0530
+@@ -67,6 +67,7 @@
+   char nominal_length_flag;
+   char recalculate_flag;
+   char busy;
++  float angle;
+ } Segment;
+ 
+ 
+@@ -91,11 +92,12 @@
+ extern void motor_set_step_count(long *a);
+ extern void wait_for_empty_segment_buffer();
+ extern char segment_buffer_full();
+-extern void motor_line(const float * const target_position,float &fr_mm_s);
++extern void motor_line(const float * const target_position,float &fr_mm_s, float angle);
+ extern void motor_engage();
+ extern void motor_disengage();
+ extern void motor_setup();
+ extern void setPenAngle(int arg0);
++extern void rotatePen(int angle);
+ 
+ extern const int movesPlanned();
+ 
+diff -duwr Makelangelo-firmware/robot_polargraph.h ../Makelangelo-firmware/robot_polargraph.h
+--- Makelangelo-firmware/robot_polargraph.h	2019-09-30 13:04:16.000000000 +0530
++++ ../Makelangelo-firmware/robot_polargraph.h	2021-03-27 18:40:07.329089189 +0530
+@@ -68,9 +68,9 @@
+ 
+ #if MACHINE_HARDWARE_VERSION == MAKELANGELO_5
+ #define MAX_SEGMENTS         (16)  // has LCD, needs more ram.
+-#define USE_LIMIT_SWITCH
+-#define HAS_SD
+-#define HAS_LCD
++//#define USE_LIMIT_SWITCH
++//#define HAS_SD
++//#define HAS_LCD
+ #endif
+ #if MACHINE_HARDWARE_VERSION == MAKELANGELO_3
+ #define MAX_SEGMENTS         (16)  // has LCD, needs more ram.
